@@ -75,6 +75,8 @@ interface OrchestrationStep {
   ifTrue?: string;
   ifFalse?: string;
   aggregation?: string;
+  errorStrategy?: 'retry' | 'fallback' | 'ignore' | 'abort';
+  fallbackSkill?: string;
   onFailure?: string;
   retryCount?: number;
 }
@@ -141,7 +143,9 @@ const INITIAL_STATE: SkillData = {
         type: 'sequential', 
         subSkills: [], 
         logic: 'Initialize the coordination context.',
-        aggregation: ''
+        aggregation: '',
+        errorStrategy: 'abort',
+        retryCount: 0
       }
     ],
   },
@@ -436,7 +440,9 @@ ${composition.orchestrationFlow.map(step => `    - step: "${step.title}"
         ${(step.ifFalse || '').replace(/\n/g, '\n        ')}` : ''}
       ${step.type === 'parallel' && step.aggregation ? `aggregation: |
         ${step.aggregation.replace(/\n/g, '\n        ')}` : ''}
-      ${step.retryCount ? `retry_count: ${step.retryCount}` : ''}
+      ${step.errorStrategy ? `error_strategy: "${step.errorStrategy}"` : ''}
+      ${step.errorStrategy === 'retry' && step.retryCount ? `retry_count: ${step.retryCount}` : ''}
+      ${step.errorStrategy === 'fallback' && step.fallbackSkill ? `fallback_skill: "${step.fallbackSkill}"` : ''}
       ${step.onFailure ? `on_failure: "${step.onFailure}"` : ''}`).join('\n')}
 ` : ''}
 # Capabilities: Tools this skill is authorized to invoke
@@ -587,12 +593,20 @@ ctx-validate --skill ${identity.name} --tests ./tests/
                           <h2 className="text-2xl font-bold tracking-tight">Identity & Intent</h2>
                           <p className="text-sm text-black/50">Define the core metadata for your skill.</p>
                         </div>
-                        <button 
-                          onClick={() => setShowConverter(true)}
-                          className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-all border border-emerald-200/50"
-                        >
-                          <RefreshCw size={14} /> Import/Convert
-                        </button>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => setShowConverter(true)}
+                            className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-all border border-emerald-200/50"
+                          >
+                            <RefreshCw size={14} /> Import/Convert
+                          </button>
+                          <button 
+                            onClick={() => setShowShortcodes(true)}
+                            className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl text-xs font-bold hover:bg-black/80 transition-all border border-black/5"
+                          >
+                            <Command size={14} /> Quick Build (Shortcodes)
+                          </button>
+                        </div>
                       </div>
                       
                       <div className="grid grid-cols-2 gap-6">
@@ -1092,9 +1106,73 @@ ctx-validate --skill ${identity.name} --tests ./tests/
                                 </div>
                               )}
 
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="space-y-4 p-4 bg-amber-50/30 border border-amber-100 rounded-2xl">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <ShieldAlert size={14} className="text-amber-600" />
+                                  <label className="text-[10px] font-bold text-amber-600 uppercase">Error Handling Strategy</label>
+                                </div>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-black/30 uppercase">Strategy</label>
+                                    <select 
+                                      value={step.errorStrategy || 'abort'}
+                                      onChange={(e) => {
+                                        const newFlow = [...data.composition.orchestrationFlow];
+                                        newFlow[idx].errorStrategy = e.target.value as any;
+                                        setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                      }}
+                                      className="w-full px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs font-bold"
+                                    >
+                                      <option value="abort">Abort (Stop Execution)</option>
+                                      <option value="retry">Retry (Attempt Again)</option>
+                                      <option value="fallback">Fallback (Use Alternative)</option>
+                                      <option value="ignore">Ignore (Continue)</option>
+                                    </select>
+                                  </div>
+
+                                  {step.errorStrategy === 'retry' && (
+                                    <div className="space-y-2">
+                                      <label className="text-[10px] font-bold text-black/30 uppercase">Retry Count</label>
+                                      <input 
+                                        type="number"
+                                        min="1"
+                                        max="5"
+                                        value={step.retryCount || 1}
+                                        onChange={(e) => {
+                                          const newFlow = [...data.composition.orchestrationFlow];
+                                          newFlow[idx].retryCount = parseInt(e.target.value) || 0;
+                                          setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                        }}
+                                        className="w-full px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs"
+                                      />
+                                    </div>
+                                  )}
+
+                                  {step.errorStrategy === 'fallback' && (
+                                    <div className="space-y-2">
+                                      <label className="text-[10px] font-bold text-black/30 uppercase">Fallback Skill</label>
+                                      <select 
+                                        value={step.fallbackSkill || ''}
+                                        onChange={(e) => {
+                                          const newFlow = [...data.composition.orchestrationFlow];
+                                          newFlow[idx].fallbackSkill = e.target.value;
+                                          setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                        }}
+                                        className="w-full px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs"
+                                      >
+                                        <option value="">Select a skill...</option>
+                                        {data.composition.subSkills.map(s => (
+                                          <option key={s} value={s}>{s}</option>
+                                        ))}
+                                        <option value="custom">Custom Action...</option>
+                                      </select>
+                                    </div>
+                                  )}
+                                </div>
+
                                 <div className="space-y-2">
-                                  <label className="text-[10px] font-bold text-black/30 uppercase">Error Handling (On Failure)</label>
+                                  <label className="text-[10px] font-bold text-black/30 uppercase">Failure Logic / Action Description</label>
                                   <input 
                                     type="text"
                                     value={step.onFailure || ''}
@@ -1103,23 +1181,8 @@ ctx-validate --skill ${identity.name} --tests ./tests/
                                       newFlow[idx].onFailure = e.target.value;
                                       setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
                                     }}
-                                    placeholder="e.g. Fallback to Skill C"
-                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs"
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <label className="text-[10px] font-bold text-black/30 uppercase">Retry Count</label>
-                                  <input 
-                                    type="number"
-                                    min="0"
-                                    max="5"
-                                    value={step.retryCount || 0}
-                                    onChange={(e) => {
-                                      const newFlow = [...data.composition.orchestrationFlow];
-                                      newFlow[idx].retryCount = parseInt(e.target.value) || 0;
-                                      setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
-                                    }}
-                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs"
+                                    placeholder="e.g. Log error and notify administrator"
+                                    className="w-full px-4 py-2 bg-white border border-amber-200 rounded-xl text-xs"
                                   />
                                 </div>
                               </div>
