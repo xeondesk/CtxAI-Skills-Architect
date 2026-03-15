@@ -21,7 +21,9 @@ import {
   Globe,
   Database,
   Code2,
-  Info
+  Info,
+  Search,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -49,6 +51,14 @@ interface Example {
   output: string;
 }
 
+interface OrchestrationStep {
+  title: string;
+  type: 'sequential' | 'parallel' | 'conditional';
+  subSkills: string[];
+  logic: string;
+  onFailure?: string;
+}
+
 interface SkillData {
   identity: {
     name: string;
@@ -67,7 +77,7 @@ interface SkillData {
   dependencies: string[];
   composition: {
     subSkills: string[];
-    orchestrationFlow: string;
+    orchestrationFlow: OrchestrationStep[];
   };
   trigger: {
     intents: string;
@@ -102,7 +112,14 @@ const INITIAL_STATE: SkillData = {
   dependencies: [],
   composition: {
     subSkills: [],
-    orchestrationFlow: '1. Call Skill A\n2. Pipe output to Skill B',
+    orchestrationFlow: [
+      { 
+        title: 'Initial Processing', 
+        type: 'sequential', 
+        subSkills: [], 
+        logic: 'Initialize the coordination context.' 
+      }
+    ],
   },
   trigger: {
     intents: 'analyze, process',
@@ -147,10 +164,32 @@ const CAPABILITY_OPTIONS = [
 
 // --- Components ---
 
+const SUGGESTED_SUB_SKILLS = [
+  'git-reader', 'code-analyzer', 'file-writer', 'api-connector', 
+  'data-parser', 'image-processor', 'nlp-engine', 'security-scanner',
+  'performance-profiler', 'documentation-gen', 'test-runner',
+  'cloud-deployer', 'log-aggregator', 'auth-manager'
+];
+
 export default function App() {
   const [currentStep, setCurrentStep] = useState(0);
   const [data, setData] = useState<SkillData>(INITIAL_STATE);
   const [copied, setCopied] = useState(false);
+  const [subSkillSearch, setSubSkillSearch] = useState('');
+
+  const removeSubSkill = (skillToRemove: string) => {
+    setData(prev => ({
+      ...prev,
+      composition: {
+        ...prev.composition,
+        subSkills: prev.composition.subSkills.filter(s => s !== skillToRemove),
+        orchestrationFlow: prev.composition.orchestrationFlow.map(step => ({
+          ...step,
+          subSkills: step.subSkills.filter(s => s !== skillToRemove)
+        }))
+      }
+    }));
+  };
 
   const nextStep = () => setCurrentStep(prev => Math.min(prev + 1, STEPS.length - 1));
   const prevStep = () => setCurrentStep(prev => Math.max(prev - 1, 0));
@@ -199,8 +238,13 @@ ${identity.type === 'coordinator' ? `# Composition: Orchestration of sub-skills
 composition:
   sub_skills:
 ${composition.subSkills.length > 0 ? composition.subSkills.map(s => `    - "${s}"`).join('\n') : '    - none'}
-  orchestration_flow: |
-    ${composition.orchestrationFlow.replace(/\n/g, '\n    ')}
+  orchestration_flow:
+${composition.orchestrationFlow.map(step => `    - step: "${step.title}"
+      type: "${step.type}"
+      sub_skills: [${step.subSkills.map(s => `"${s}"`).join(', ')}]
+      logic: |
+        ${step.logic.replace(/\n/g, '\n        ')}
+      ${step.onFailure ? `on_failure: "${step.onFailure}"` : ''}`).join('\n')}
 ` : ''}
 # Capabilities: Tools this skill is authorized to invoke
 capabilities:
@@ -537,47 +581,247 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
                   {currentStep === 2 && (
                     <div className="space-y-6">
                       <h2 className="text-2xl font-bold tracking-tight mb-2">Skill Composition</h2>
-                      <p className="text-sm text-black/50 mb-8">Define how this Coordinator Skill orchestrates its atomic sub-skills.</p>
+                      <p className="text-sm text-black/50 mb-8">Define how this Coordinator Skill orchestrates its atomic sub-skills using complex logic.</p>
 
                       <div className="space-y-4">
                         <label className="text-[10px] font-bold uppercase tracking-widest text-black/40">Sub-Skills to Coordinate</label>
-                        <div className="flex gap-2">
-                          <input 
-                            type="text"
-                            placeholder="e.g. git-reader"
-                            className="flex-1 px-4 py-3 bg-[#F9F9F9] border border-black/5 rounded-xl focus:outline-none focus:border-emerald-500"
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                const val = (e.target as HTMLInputElement).value.trim();
-                                if (val) {
-                                  setData(prev => ({ ...prev, composition: { ...prev.composition, subSkills: [...prev.composition.subSkills, val] } }));
-                                  (e.target as HTMLInputElement).value = '';
-                                }
-                              }
-                            }}
-                          />
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {data.composition.subSkills.map((skill, idx) => (
-                            <span key={idx} className="px-3 py-1 bg-emerald-500 text-white text-xs font-bold rounded-full flex items-center gap-2">
-                              {skill}
-                              <button onClick={() => setData(prev => ({ ...prev, composition: { ...prev.composition, subSkills: prev.composition.subSkills.filter((_, i) => i !== idx) } }))}>
-                                <Trash2 size={10} className="hover:text-red-400" />
+                        
+                        <div className="relative">
+                          <div className="flex gap-2">
+                            <div className="relative flex-1">
+                              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-black/20" size={18} />
+                              <input 
+                                type="text"
+                                value={subSkillSearch}
+                                onChange={(e) => setSubSkillSearch(e.target.value)}
+                                placeholder="Search or add sub-skill..."
+                                className="w-full pl-12 pr-12 py-3 bg-[#F9F9F9] border border-black/5 rounded-xl focus:outline-none focus:border-emerald-500"
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    const val = subSkillSearch.trim();
+                                    if (val && !data.composition.subSkills.includes(val)) {
+                                      setData(prev => ({ ...prev, composition: { ...prev.composition, subSkills: [...prev.composition.subSkills, val] } }));
+                                      setSubSkillSearch('');
+                                    }
+                                  }
+                                }}
+                              />
+                              {subSkillSearch && (
+                                <button 
+                                  onClick={() => setSubSkillSearch('')}
+                                  className="absolute right-4 top-1/2 -translate-y-1/2 text-black/20 hover:text-black/60 transition-colors"
+                                >
+                                  <X size={16} />
+                                </button>
+                              )}
+                            </div>
+                            {subSkillSearch && !SUGGESTED_SUB_SKILLS.some(s => s.toLowerCase() === subSkillSearch.toLowerCase()) && (
+                              <button 
+                                onClick={() => {
+                                  const val = subSkillSearch.trim();
+                                  if (val && !data.composition.subSkills.includes(val)) {
+                                    setData(prev => ({ ...prev, composition: { ...prev.composition, subSkills: [...prev.composition.subSkills, val] } }));
+                                    setSubSkillSearch('');
+                                  }
+                                }}
+                                className="px-6 bg-black text-white rounded-xl font-bold text-xs hover:bg-black/80 transition-all"
+                              >
+                                Add New
                               </button>
-                            </span>
-                          ))}
+                            )}
+                          </div>
+
+                          {/* Search Results / Suggestions */}
+                          {subSkillSearch && (
+                            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-black/5 rounded-2xl shadow-xl z-20 overflow-hidden">
+                              {SUGGESTED_SUB_SKILLS.filter(s => 
+                                s.toLowerCase().includes(subSkillSearch.toLowerCase()) && 
+                                !data.composition.subSkills.includes(s)
+                              ).length > 0 ? (
+                                SUGGESTED_SUB_SKILLS
+                                  .filter(s => s.toLowerCase().includes(subSkillSearch.toLowerCase()) && !data.composition.subSkills.includes(s))
+                                  .map(s => (
+                                    <button
+                                      key={s}
+                                      onClick={() => {
+                                        setData(prev => ({ ...prev, composition: { ...prev.composition, subSkills: [...prev.composition.subSkills, s] } }));
+                                        setSubSkillSearch('');
+                                      }}
+                                      className="w-full text-left px-6 py-3 hover:bg-emerald-50 text-sm font-medium transition-colors flex items-center justify-between group"
+                                    >
+                                      {s}
+                                      <Plus size={14} className="text-emerald-500 opacity-0 group-hover:opacity-100" />
+                                    </button>
+                                  ))
+                              ) : (
+                                <div className="px-6 py-4 text-xs text-black/30 italic">
+                                  No matches found. Press Enter to add "{subSkillSearch}"
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 pt-2">
+                          <AnimatePresence>
+                            {data.composition.subSkills.map((skill, idx) => (
+                              <motion.div
+                                key={skill}
+                                initial={{ opacity: 0, scale: 0.8 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.8 }}
+                                className="group flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-sm hover:bg-emerald-600 transition-all cursor-default"
+                              >
+                                {skill}
+                                <button 
+                                  onClick={() => removeSubSkill(skill)}
+                                  className="hover:bg-white/20 rounded-full p-0.5 transition-colors"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </motion.div>
+                            ))}
+                          </AnimatePresence>
+                          {data.composition.subSkills.length === 0 && (
+                            <div className="w-full py-8 border-2 border-dashed border-black/5 rounded-3xl flex flex-col items-center justify-center text-black/20">
+                              <Layers size={32} className="mb-2" />
+                              <p className="text-xs font-bold uppercase tracking-widest">No sub-skills added yet</p>
+                            </div>
+                          )}
                         </div>
                       </div>
 
-                      <div className="space-y-2 pt-4">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-black/40">Orchestration Flow (Piping Logic)</label>
-                        <textarea 
-                          value={data.composition.orchestrationFlow}
-                          onChange={(e) => setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: e.target.value } }))}
-                          className="w-full px-4 py-3 bg-[#F9F9F9] border border-black/5 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all min-h-[150px] font-mono text-sm"
-                          placeholder="Describe how data flows between sub-skills..."
-                        />
-                        <p className="text-[10px] text-black/30 italic">Tip: Use step-by-step numbering to define the sequence of calls and data piping.</p>
+                      <div className="space-y-6 pt-4">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-bold uppercase tracking-widest text-black/40">Orchestration Flow (Complex Logic)</label>
+                          <button 
+                            onClick={() => setData(prev => ({
+                              ...prev,
+                              composition: { 
+                                ...prev.composition, 
+                                orchestrationFlow: [
+                                  ...prev.composition.orchestrationFlow, 
+                                  { title: '', type: 'sequential', subSkills: [], logic: '' }
+                                ] 
+                              }
+                            }))}
+                            className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1 text-xs font-bold"
+                          >
+                            <Plus size={14} /> Add Step
+                          </button>
+                        </div>
+
+                        <div className="space-y-4">
+                          {data.composition.orchestrationFlow.map((step, idx) => (
+                            <div key={idx} className="bg-[#F9F9F9] p-6 rounded-3xl border border-black/5 space-y-4 relative group">
+                              <button 
+                                onClick={() => setData(prev => ({
+                                  ...prev,
+                                  composition: {
+                                    ...prev.composition,
+                                    orchestrationFlow: prev.composition.orchestrationFlow.filter((_, i) => i !== idx)
+                                  }
+                                }))}
+                                className="absolute top-4 right-4 p-2 text-black/10 hover:text-red-500 transition-colors"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-black/30 uppercase">Step Title</label>
+                                  <input 
+                                    type="text"
+                                    value={step.title}
+                                    onChange={(e) => {
+                                      const newFlow = [...data.composition.orchestrationFlow];
+                                      newFlow[idx].title = e.target.value;
+                                      setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                    }}
+                                    placeholder="e.g. Parallel Analysis"
+                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-sm font-bold"
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-black/30 uppercase">Execution Type</label>
+                                  <select 
+                                    value={step.type}
+                                    onChange={(e) => {
+                                      const newFlow = [...data.composition.orchestrationFlow];
+                                      newFlow[idx].type = e.target.value as any;
+                                      setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                    }}
+                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs font-bold"
+                                  >
+                                    <option value="sequential">Sequential</option>
+                                    <option value="parallel">Parallel</option>
+                                    <option value="conditional">Conditional</option>
+                                  </select>
+                                </div>
+                              </div>
+
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-black/30 uppercase">Involved Sub-Skills</label>
+                                <div className="flex flex-wrap gap-2 p-2 bg-white border border-black/5 rounded-xl min-h-[40px]">
+                                  {data.composition.subSkills.map(s => (
+                                    <button
+                                      key={s}
+                                      onClick={() => {
+                                        const newFlow = [...data.composition.orchestrationFlow];
+                                        const currentSubSkills = newFlow[idx].subSkills;
+                                        newFlow[idx].subSkills = currentSubSkills.includes(s)
+                                          ? currentSubSkills.filter(item => item !== s)
+                                          : [...currentSubSkills, s];
+                                        setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                      }}
+                                      className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                                        step.subSkills.includes(s) 
+                                          ? 'bg-emerald-500 text-white' 
+                                          : 'bg-black/5 text-black/40 hover:bg-black/10'
+                                      }`}
+                                    >
+                                      {s}
+                                    </button>
+                                  ))}
+                                  {data.composition.subSkills.length === 0 && (
+                                    <span className="text-[10px] text-black/20 italic">Add sub-skills above first</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-black/30 uppercase">
+                                  {step.type === 'conditional' ? 'Condition & Logic' : 'Step Logic'}
+                                </label>
+                                <textarea 
+                                  value={step.logic}
+                                  onChange={(e) => {
+                                    const newFlow = [...data.composition.orchestrationFlow];
+                                    newFlow[idx].logic = e.target.value;
+                                    setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                  }}
+                                  placeholder={step.type === 'conditional' ? 'if (output_a.valid) { ... }' : 'Describe the logic...'}
+                                  className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs min-h-[80px] font-mono"
+                                />
+                              </div>
+
+                              <div className="space-y-2">
+                                <label className="text-[10px] font-bold text-black/30 uppercase">Error Handling (On Failure)</label>
+                                <input 
+                                  type="text"
+                                  value={step.onFailure || ''}
+                                  onChange={(e) => {
+                                    const newFlow = [...data.composition.orchestrationFlow];
+                                    newFlow[idx].onFailure = e.target.value;
+                                    setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                  }}
+                                  placeholder="e.g. Fallback to Skill C"
+                                  className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   )}
