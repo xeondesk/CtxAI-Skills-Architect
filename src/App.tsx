@@ -26,10 +26,15 @@ import {
   X,
   RefreshCw,
   FileJson,
-  Wand2
+  Wand2,
+  Command,
+  Terminal as TerminalIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import yaml from 'js-yaml';
+import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 // --- Types ---
 
@@ -204,6 +209,59 @@ export default function App() {
   const [showConverter, setShowConverter] = useState(false);
   const [converterInput, setConverterInput] = useState('');
   const [converterError, setConverterError] = useState<string | null>(null);
+  const [showShortcodes, setShowShortcodes] = useState(false);
+  const [shortcodeInput, setShortcodeInput] = useState('');
+
+  const handleShortcodes = () => {
+    const lines = shortcodeInput.split('\n');
+    let updatedData = JSON.parse(JSON.stringify(data));
+    let changed = false;
+
+    lines.forEach(line => {
+      // [skill: name | description | version | tags]
+      const skillMatch = line.match(/\[skill:\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^\]]+)\]/i);
+      if (skillMatch) {
+        updatedData.identity.name = skillMatch[1].trim();
+        updatedData.identity.description = skillMatch[2].trim();
+        updatedData.identity.version = skillMatch[3].trim();
+        updatedData.identity.tags = skillMatch[4].trim();
+        changed = true;
+      }
+
+      // [input: name | type | required | default]
+      const inputMatch = line.match(/\[input:\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^\]]+)\]/i);
+      if (inputMatch) {
+        updatedData.interface.inputs.push({
+          name: inputMatch[1].trim(),
+          type: inputMatch[2].trim().toLowerCase(),
+          required: inputMatch[3].trim().toLowerCase() === 'true',
+          defaultValue: inputMatch[4].trim()
+        });
+        changed = true;
+      }
+
+      // [output: name]
+      const outputMatch = line.match(/\[output:\s*([^\]]+)\]/i);
+      if (outputMatch) {
+        updatedData.interface.outputs.push(outputMatch[1].trim());
+        changed = true;
+      }
+
+      // [intent: intents | confidence]
+      const intentMatch = line.match(/\[intent:\s*([^|]+)\s*\|\s*([^\]]+)\]/i);
+      if (intentMatch) {
+        updatedData.trigger.intents = intentMatch[1].trim();
+        updatedData.trigger.confidence = parseFloat(intentMatch[2].trim());
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      setData(updatedData);
+      setShowShortcodes(false);
+      setShortcodeInput('');
+    }
+  };
 
   const handleConvert = () => {
     try {
@@ -458,6 +516,13 @@ ctx-validate --skill ${identity.name} --tests ./tests/
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button 
+            onClick={() => setShowShortcodes(true)}
+            className="p-2 hover:bg-black/5 rounded-lg transition-colors text-black/60"
+            title="Build Shortcodes"
+          >
+            <Command size={20} />
+          </button>
           <button 
             onClick={handleDownload}
             className="p-2 hover:bg-black/5 rounded-lg transition-colors text-black/60"
@@ -1572,12 +1637,104 @@ ctx-validate --skill ${identity.name} --tests ./tests/
                 </div>
                 <span className="text-[10px] font-mono text-black/40">SKILL.md</span>
               </div>
-              <div className="flex-1 p-6 overflow-auto font-mono text-[11px] leading-relaxed text-black/60 scrollbar-hide">
-                <pre className="whitespace-pre-wrap">{generateMarkdown}</pre>
+              <div className="flex-1 p-6 overflow-auto text-[11px] leading-relaxed text-black/60 scrollbar-hide markdown-body">
+                <ReactMarkdown
+                  components={{
+                    code({ node, inline, className, children, ...props }: any) {
+                      const match = /language-(\w+)/.exec(className || '');
+                      return !inline && match ? (
+                        <SyntaxHighlighter
+                          style={atomDark}
+                          language={match[1]}
+                          PreTag="div"
+                          {...props}
+                        >
+                          {String(children).replace(/\n$/, '')}
+                        </SyntaxHighlighter>
+                      ) : (
+                        <code className={className} {...props}>
+                          {children}
+                        </code>
+                      );
+                    }
+                  }}
+                >
+                  {generateMarkdown}
+                </ReactMarkdown>
               </div>
             </div>
           </div>
         </div>
+
+        {/* Shortcode Modal */}
+        <AnimatePresence>
+          {showShortcodes && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden border border-black/5"
+              >
+                <div className="p-6 border-b border-black/5 flex items-center justify-between bg-[#F9F9F9]">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-black text-white rounded-xl">
+                      <Command size={20} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-lg">Build Shortcodes</h3>
+                      <p className="text-[10px] text-black/40 uppercase font-bold tracking-widest">Dynamic Macro Processor</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowShortcodes(false)}
+                    className="p-2 hover:bg-black/5 rounded-full transition-all"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                
+                <div className="p-8 space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-black/30 uppercase">Enter Shortcodes</label>
+                    <textarea 
+                      value={shortcodeInput}
+                      onChange={(e) => setShortcodeInput(e.target.value)}
+                      placeholder="[skill: My Skill | Description | 1.0.0 | tags]&#10;[input: query | string | true | default]&#10;[output: result]"
+                      className="w-full h-[200px] p-4 bg-[#F9F9F9] border border-black/5 rounded-2xl font-mono text-xs focus:outline-none focus:ring-2 focus:ring-black/5"
+                    />
+                  </div>
+
+                  <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
+                    <h4 className="text-[10px] font-bold text-blue-900 uppercase mb-2">Available Macros</h4>
+                    <ul className="text-[10px] text-blue-700 space-y-1 font-mono">
+                      <li>[skill: name | desc | ver | tags]</li>
+                      <li>[input: name | type | required | default]</li>
+                      <li>[output: name]</li>
+                      <li>[intent: intents | confidence]</li>
+                    </ul>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => setShowShortcodes(false)}
+                      className="flex-1 py-4 bg-[#F9F9F9] text-black/40 font-bold rounded-2xl hover:bg-black/5 transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={handleShortcodes}
+                      disabled={!shortcodeInput.trim()}
+                      className="flex-[2] py-4 bg-black text-white font-bold rounded-2xl shadow-lg shadow-black/10 hover:bg-black/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      <Zap size={18} /> Execute Macros
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
 
         {/* Converter Modal */}
         <AnimatePresence>
