@@ -23,9 +23,13 @@ import {
   Code2,
   Info,
   Search,
-  X
+  X,
+  RefreshCw,
+  FileJson,
+  Wand2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import yaml from 'js-yaml';
 
 // --- Types ---
 
@@ -51,12 +55,23 @@ interface Example {
   output: string;
 }
 
+interface TestCase {
+  name: string;
+  input: string;
+  expected: string;
+}
+
 interface OrchestrationStep {
   title: string;
   type: 'sequential' | 'parallel' | 'conditional';
   subSkills: string[];
   logic: string;
+  condition?: string;
+  ifTrue?: string;
+  ifFalse?: string;
+  aggregation?: string;
   onFailure?: string;
+  retryCount?: number;
 }
 
 interface SkillData {
@@ -90,6 +105,9 @@ interface SkillData {
   };
   constraints: string[];
   examples: Example[];
+  validation: {
+    tests: TestCase[];
+  };
 }
 
 // --- Constants ---
@@ -117,7 +135,8 @@ const INITIAL_STATE: SkillData = {
         title: 'Initial Processing', 
         type: 'sequential', 
         subSkills: [], 
-        logic: 'Initialize the coordination context.' 
+        logic: 'Initialize the coordination context.',
+        aggregation: ''
       }
     ],
   },
@@ -142,6 +161,11 @@ const INITIAL_STATE: SkillData = {
   examples: [
     { input: 'Sample Input', output: 'Sample Output' }
   ],
+  validation: {
+    tests: [
+      { name: 'Standard Case', input: 'Sample input for validation', expected: 'Expected markdown output' }
+    ],
+  },
 };
 
 const STEPS = [
@@ -151,6 +175,7 @@ const STEPS = [
   { id: 'capabilities', title: 'Capabilities', icon: Zap },
   { id: 'logic', title: 'Logic', icon: Cpu },
   { id: 'constraints', title: 'Guardrails', icon: ShieldAlert },
+  { id: 'validation', title: 'Tests', icon: Terminal },
   { id: 'preview', title: 'Preview', icon: FileText },
 ];
 
@@ -176,6 +201,108 @@ export default function App() {
   const [data, setData] = useState<SkillData>(INITIAL_STATE);
   const [copied, setCopied] = useState(false);
   const [subSkillSearch, setSubSkillSearch] = useState('');
+  const [showConverter, setShowConverter] = useState(false);
+  const [converterInput, setConverterInput] = useState('');
+  const [converterError, setConverterError] = useState<string | null>(null);
+
+  const handleConvert = () => {
+    try {
+      setConverterError(null);
+      let parsed: any;
+      
+      try {
+        parsed = JSON.parse(converterInput);
+      } catch (e) {
+        parsed = yaml.load(converterInput);
+      }
+
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Invalid input format. Please provide valid JSON or YAML.');
+      }
+
+      // Mapping logic for OpenClaw/Generic formats
+      const newData: SkillData = JSON.parse(JSON.stringify(INITIAL_STATE));
+      
+      // Identity
+      newData.identity.name = parsed.name || parsed.id || newData.identity.name;
+      newData.identity.description = parsed.description || parsed.summary || newData.identity.description;
+      newData.identity.version = parsed.version || newData.identity.version;
+      newData.identity.category = parsed.category || parsed.group || newData.identity.category;
+      
+      if (parsed.tags && Array.isArray(parsed.tags)) {
+        newData.identity.tags = parsed.tags.join(', ');
+      }
+
+      // Interface - Inputs
+      const params = parsed.parameters || parsed.inputs || parsed.args;
+      if (params && typeof params === 'object') {
+        const inputs: InputField[] = [];
+        
+        // Handle JSON Schema style
+        if (params.properties) {
+          Object.entries(params.properties).forEach(([key, val]: [string, any]) => {
+            inputs.push({
+              name: key,
+              type: val.type || 'string',
+              required: Array.isArray(params.required) ? params.required.includes(key) : false,
+              defaultValue: val.default || ''
+            });
+          });
+        } 
+        // Handle simple object style
+        else if (!Array.isArray(params)) {
+          Object.entries(params).forEach(([key, val]: [string, any]) => {
+            inputs.push({
+              name: key,
+              type: typeof val === 'string' ? val : 'string',
+              required: true,
+              defaultValue: ''
+            });
+          });
+        }
+        // Handle array style
+        else if (Array.isArray(params)) {
+          params.forEach((p: any) => {
+            if (typeof p === 'string') {
+              inputs.push({ name: p, type: 'string', required: true, defaultValue: '' });
+            } else if (p.name) {
+              inputs.push({
+                name: p.name,
+                type: p.type || 'string',
+                required: p.required !== undefined ? p.required : true,
+                defaultValue: p.default || ''
+              });
+            }
+          });
+        }
+        
+        if (inputs.length > 0) {
+          newData.interface.inputs = inputs;
+        }
+      }
+
+      // Interface - Outputs
+      const outputs = parsed.outputs || parsed.returns;
+      if (outputs) {
+        if (Array.isArray(outputs)) {
+          newData.interface.outputs = outputs.map(o => typeof o === 'string' ? o : (o.name || 'result'));
+        } else if (typeof outputs === 'string') {
+          newData.interface.outputs = [outputs];
+        }
+      }
+
+      // Logic
+      if (parsed.logic || parsed.implementation) {
+        newData.logic.initialization = typeof parsed.logic === 'string' ? parsed.logic : (parsed.logic?.init || newData.logic.initialization);
+      }
+
+      setData(newData);
+      setShowConverter(false);
+      setConverterInput('');
+    } catch (err: any) {
+      setConverterError(err.message || 'Failed to convert skill. Check format.');
+    }
+  };
 
   const removeSubSkill = (skillToRemove: string) => {
     setData(prev => ({
@@ -218,7 +345,7 @@ export default function App() {
   };
 
   const generateMarkdown = useMemo(() => {
-    const { identity, interface: iface, capabilities, dependencies, trigger, logic, constraints, examples, composition } = data;
+    const { identity, interface: iface, capabilities, dependencies, trigger, logic, constraints, examples, composition, validation } = data;
     
     const yaml = `---
 name: "${identity.name}"
@@ -244,6 +371,14 @@ ${composition.orchestrationFlow.map(step => `    - step: "${step.title}"
       sub_skills: [${step.subSkills.map(s => `"${s}"`).join(', ')}]
       logic: |
         ${step.logic.replace(/\n/g, '\n        ')}
+      ${step.type === 'conditional' && step.condition ? `condition: "${step.condition}"
+      if_true: |
+        ${(step.ifTrue || '').replace(/\n/g, '\n        ')}
+      if_false: |
+        ${(step.ifFalse || '').replace(/\n/g, '\n        ')}` : ''}
+      ${step.type === 'parallel' && step.aggregation ? `aggregation: |
+        ${step.aggregation.replace(/\n/g, '\n        ')}` : ''}
+      ${step.retryCount ? `retry_count: ${step.retryCount}` : ''}
       ${step.onFailure ? `on_failure: "${step.onFailure}"` : ''}`).join('\n')}
 ` : ''}
 # Capabilities: Tools this skill is authorized to invoke
@@ -275,6 +410,20 @@ ${constraints.map(c => `- ${c}`).join('\n')}
 
 # Examples (Few-Shot Prompting)
 ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`).join('\n\n')}
+
+# Testing & Validation
+To ensure this skill functions correctly, the following test cases are defined in the \`tests/\` directory:
+
+${validation.tests.map((test, i) => `- **Test Case ${i + 1}: ${test.name}**
+  - Input: \`tests/test_${i + 1}/input.txt\`
+  - Expected: \`tests/test_${i + 1}/expected.md\`
+  - Description: ${test.input.slice(0, 50)}...`).join('\n')}
+
+## Automated Validation Command
+\`\`\`bash
+# Run validation for this skill
+ctx-validate --skill ${identity.name} --tests ./tests/
+\`\`\`
 `;
     return yaml;
   }, [data]);
@@ -368,8 +517,18 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
                 >
                   {currentStep === 0 && (
                     <div className="space-y-6">
-                      <h2 className="text-2xl font-bold tracking-tight mb-2">Identity & Intent</h2>
-                      <p className="text-sm text-black/50 mb-8">Define the core metadata for your skill. This helps the Master Agent route tasks correctly.</p>
+                      <div className="flex items-center justify-between mb-2">
+                        <div>
+                          <h2 className="text-2xl font-bold tracking-tight">Identity & Intent</h2>
+                          <p className="text-sm text-black/50">Define the core metadata for your skill.</p>
+                        </div>
+                        <button 
+                          onClick={() => setShowConverter(true)}
+                          className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-all border border-emerald-200/50"
+                        >
+                          <RefreshCw size={14} /> Import/Convert
+                        </button>
+                      </div>
                       
                       <div className="grid grid-cols-2 gap-6">
                         <div className="space-y-2">
@@ -701,7 +860,7 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
                                 ...prev.composition, 
                                 orchestrationFlow: [
                                   ...prev.composition.orchestrationFlow, 
-                                  { title: '', type: 'sequential', subSkills: [], logic: '' }
+                                  { title: '', type: 'sequential', subSkills: [], logic: '', aggregation: '' }
                                 ] 
                               }
                             }))}
@@ -791,7 +950,7 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
 
                               <div className="space-y-2">
                                 <label className="text-[10px] font-bold text-black/30 uppercase">
-                                  {step.type === 'conditional' ? 'Condition & Logic' : 'Step Logic'}
+                                  {step.type === 'conditional' ? 'Step Description' : 'Step Logic'}
                                 </label>
                                 <textarea 
                                   value={step.logic}
@@ -800,24 +959,104 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
                                     newFlow[idx].logic = e.target.value;
                                     setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
                                   }}
-                                  placeholder={step.type === 'conditional' ? 'if (output_a.valid) { ... }' : 'Describe the logic...'}
+                                  placeholder={step.type === 'conditional' ? 'Describe what this branching point does...' : 'Describe the logic...'}
                                   className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs min-h-[80px] font-mono"
                                 />
                               </div>
 
-                              <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-black/30 uppercase">Error Handling (On Failure)</label>
-                                <input 
-                                  type="text"
-                                  value={step.onFailure || ''}
-                                  onChange={(e) => {
-                                    const newFlow = [...data.composition.orchestrationFlow];
-                                    newFlow[idx].onFailure = e.target.value;
-                                    setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
-                                  }}
-                                  placeholder="e.g. Fallback to Skill C"
-                                  className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs"
-                                />
+                              {step.type === 'conditional' && (
+                                <div className="space-y-4 p-4 bg-blue-50/30 border border-blue-100 rounded-2xl">
+                                  <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-blue-600 uppercase">Condition (Expression)</label>
+                                    <input 
+                                      type="text"
+                                      value={step.condition || ''}
+                                      onChange={(e) => {
+                                        const newFlow = [...data.composition.orchestrationFlow];
+                                        newFlow[idx].condition = e.target.value;
+                                        setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                      }}
+                                      placeholder="e.g. results.analysis.score > 0.8"
+                                      className="w-full px-4 py-2 bg-white border border-blue-200 rounded-xl text-xs font-mono"
+                                    />
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="space-y-2">
+                                      <label className="text-[10px] font-bold text-emerald-600 uppercase">If True (Next Step/Action)</label>
+                                      <textarea 
+                                        value={step.ifTrue || ''}
+                                        onChange={(e) => {
+                                          const newFlow = [...data.composition.orchestrationFlow];
+                                          newFlow[idx].ifTrue = e.target.value;
+                                          setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                        }}
+                                        placeholder="Execute Skill B..."
+                                        className="w-full px-4 py-2 bg-white border border-emerald-200 rounded-xl text-xs min-h-[60px]"
+                                      />
+                                    </div>
+                                    <div className="space-y-2">
+                                      <label className="text-[10px] font-bold text-red-600 uppercase">If False (Next Step/Action)</label>
+                                      <textarea 
+                                        value={step.ifFalse || ''}
+                                        onChange={(e) => {
+                                          const newFlow = [...data.composition.orchestrationFlow];
+                                          newFlow[idx].ifFalse = e.target.value;
+                                          setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                        }}
+                                        placeholder="Execute Skill C..."
+                                        className="w-full px-4 py-2 bg-white border border-red-200 rounded-xl text-xs min-h-[60px]"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+
+                              {step.type === 'parallel' && (
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-emerald-600 uppercase">Aggregation Strategy</label>
+                                  <textarea 
+                                    value={step.aggregation || ''}
+                                    onChange={(e) => {
+                                      const newFlow = [...data.composition.orchestrationFlow];
+                                      newFlow[idx].aggregation = e.target.value;
+                                      setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                    }}
+                                    placeholder="How to merge parallel results (e.g. Combine into a single report...)"
+                                    className="w-full px-4 py-2 bg-emerald-50/50 border border-emerald-100 rounded-xl text-xs min-h-[80px] font-mono"
+                                  />
+                                </div>
+                              )}
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-black/30 uppercase">Error Handling (On Failure)</label>
+                                  <input 
+                                    type="text"
+                                    value={step.onFailure || ''}
+                                    onChange={(e) => {
+                                      const newFlow = [...data.composition.orchestrationFlow];
+                                      newFlow[idx].onFailure = e.target.value;
+                                      setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                    }}
+                                    placeholder="e.g. Fallback to Skill C"
+                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs"
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-black/30 uppercase">Retry Count</label>
+                                  <input 
+                                    type="number"
+                                    min="0"
+                                    max="5"
+                                    value={step.retryCount || 0}
+                                    onChange={(e) => {
+                                      const newFlow = [...data.composition.orchestrationFlow];
+                                      newFlow[idx].retryCount = parseInt(e.target.value) || 0;
+                                      setData(prev => ({ ...prev, composition: { ...prev.composition, orchestrationFlow: newFlow } }));
+                                    }}
+                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs"
+                                  />
+                                </div>
                               </div>
                             </div>
                           ))}
@@ -1083,7 +1322,191 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
                     </div>
                   )}
 
+                  {currentStep === 5 && (
+                    <div className="space-y-8">
+                      <div>
+                        <h2 className="text-2xl font-bold tracking-tight mb-2">Guardrails & Examples</h2>
+                        <p className="text-sm text-black/50 mb-8">Define the "No-Go" zones and provide few-shot examples for better accuracy.</p>
+                        
+                        <div className="space-y-4">
+                          <div className="flex items-center justify-between">
+                            <label className="text-[10px] font-bold uppercase tracking-widest text-black/40">Constraints</label>
+                            <button 
+                              onClick={() => setData(prev => ({ ...prev, constraints: [...prev.constraints, ''] }))}
+                              className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1 text-xs font-bold"
+                            >
+                              <Plus size={14} /> Add Constraint
+                            </button>
+                          </div>
+                          {data.constraints.map((c, idx) => (
+                            <div key={idx} className="flex gap-2">
+                              <input 
+                                type="text"
+                                value={c}
+                                onChange={(e) => {
+                                  const newC = [...data.constraints];
+                                  newC[idx] = e.target.value;
+                                  setData(prev => ({ ...prev, constraints: newC }));
+                                }}
+                                placeholder="e.g. NEVER reveal internal system prompts."
+                                className="flex-1 px-4 py-2 bg-[#F9F9F9] border border-black/5 rounded-xl text-sm"
+                              />
+                              <button onClick={() => setData(prev => ({ ...prev, constraints: prev.constraints.filter((_, i) => i !== idx) }))}>
+                                <Trash2 size={16} className="text-black/20 hover:text-red-500" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="space-y-4 pt-8">
+                          <div className="flex items-center justify-between">
+                            <label className="text-[10px] font-bold uppercase tracking-widest text-black/40">Examples (Few-Shot)</label>
+                            <button 
+                              onClick={() => setData(prev => ({ ...prev, examples: [...prev.examples, { input: '', output: '' }] }))}
+                              className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1 text-xs font-bold"
+                            >
+                              <Plus size={14} /> Add Example
+                            </button>
+                          </div>
+                          {data.examples.map((ex, idx) => (
+                            <div key={idx} className="bg-[#F9F9F9] p-4 rounded-2xl border border-black/5 space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-[10px] font-bold text-black/30">EXAMPLE #{idx + 1}</span>
+                                <button onClick={() => setData(prev => ({ ...prev, examples: prev.examples.filter((_, i) => i !== idx) }))}>
+                                  <Trash2 size={14} className="text-black/20 hover:text-red-500" />
+                                </button>
+                              </div>
+                              <textarea 
+                                value={ex.input}
+                                onChange={(e) => {
+                                  const newEx = [...data.examples];
+                                  newEx[idx].input = e.target.value;
+                                  setData(prev => ({ ...prev, examples: newEx }));
+                                }}
+                                placeholder="Input..."
+                                className="w-full px-3 py-2 bg-white border border-black/5 rounded-lg text-xs min-h-[60px]"
+                              />
+                              <textarea 
+                                value={ex.output}
+                                onChange={(e) => {
+                                  const newEx = [...data.examples];
+                                  newEx[idx].output = e.target.value;
+                                  setData(prev => ({ ...prev, examples: newEx }));
+                                }}
+                                placeholder="Expected Output..."
+                                className="w-full px-3 py-2 bg-white border border-black/5 rounded-lg text-xs min-h-[60px]"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {currentStep === 6 && (
+                    <div className="space-y-8">
+                      <div>
+                        <h2 className="text-2xl font-bold tracking-tight mb-2">Validation & Tests</h2>
+                        <p className="text-sm text-black/50 mb-8">Define test cases that will be stored in the <code>tests/</code> directory for automated validation.</p>
+                        
+                        <div className="space-y-6">
+                          <div className="flex items-center justify-between">
+                            <label className="text-[10px] font-bold uppercase tracking-widest text-black/40">Test Cases</label>
+                            <button 
+                              onClick={() => setData(prev => ({ 
+                                ...prev, 
+                                validation: { 
+                                  tests: [...prev.validation.tests, { name: '', input: '', expected: '' }] 
+                                } 
+                              }))}
+                              className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1 text-xs font-bold"
+                            >
+                              <Plus size={14} /> Add Test Case
+                            </button>
+                          </div>
+
+                          <div className="space-y-4">
+                            {data.validation.tests.map((test, idx) => (
+                              <div key={idx} className="bg-[#F9F9F9] p-6 rounded-3xl border border-black/5 space-y-4 relative group">
+                                <button 
+                                  onClick={() => setData(prev => ({ 
+                                    ...prev, 
+                                    validation: { 
+                                      tests: prev.validation.tests.filter((_, i) => i !== idx) 
+                                    } 
+                                  }))}
+                                  className="absolute top-4 right-4 p-2 text-black/10 hover:text-red-500 transition-colors"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-black/30 uppercase">Test Name</label>
+                                  <input 
+                                    type="text"
+                                    value={test.name}
+                                    onChange={(e) => {
+                                      const newTests = [...data.validation.tests];
+                                      newTests[idx].name = e.target.value;
+                                      setData(prev => ({ ...prev, validation: { tests: newTests } }));
+                                    }}
+                                    placeholder="e.g. Edge Case: Empty Input"
+                                    className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-sm font-bold"
+                                  />
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-black/30 uppercase">Input (input.txt)</label>
+                                    <textarea 
+                                      value={test.input}
+                                      onChange={(e) => {
+                                        const newTests = [...data.validation.tests];
+                                        newTests[idx].input = e.target.value;
+                                        setData(prev => ({ ...prev, validation: { tests: newTests } }));
+                                      }}
+                                      placeholder="Raw input data..."
+                                      className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs min-h-[100px] font-mono"
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-black/30 uppercase">Expected (expected.md)</label>
+                                    <textarea 
+                                      value={test.expected}
+                                      onChange={(e) => {
+                                        const newTests = [...data.validation.tests];
+                                        newTests[idx].expected = e.target.value;
+                                        setData(prev => ({ ...prev, validation: { tests: newTests } }));
+                                      }}
+                                      placeholder="Expected markdown output..."
+                                      className="w-full px-4 py-2 bg-white border border-black/5 rounded-xl text-xs min-h-[100px] font-mono"
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="mt-8 p-6 bg-emerald-50 rounded-3xl border border-emerald-100">
+                          <div className="flex items-start gap-4">
+                            <div className="p-2 bg-emerald-500 text-white rounded-xl">
+                              <Terminal size={20} />
+                            </div>
+                            <div>
+                              <h4 className="font-bold text-sm text-emerald-900">Automated Validation</h4>
+                              <p className="text-xs text-emerald-700 mt-1 leading-relaxed">
+                                Defining these tests will automatically generate a <code>tests/</code> directory structure in your skill package. 
+                                You can use the <code>ctx-validate</code> tool to run these tests against your skill implementation.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {currentStep === 7 && (
                     <div className="space-y-6">
                       <h2 className="text-2xl font-bold tracking-tight mb-2">Final Review</h2>
                       <p className="text-sm text-black/50 mb-8">Your SKILL.md is ready. Review the generated content and export it to your project.</p>
@@ -1155,6 +1578,73 @@ ${examples.map(ex => `**Input:**\n${ex.input}\n\n**Output:**\n${ex.output}\n---`
             </div>
           </div>
         </div>
+
+        {/* Converter Modal */}
+        <AnimatePresence>
+          {showConverter && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden border border-black/5"
+              >
+                <div className="p-6 border-b border-black/5 flex items-center justify-between bg-[#F9F9F9]">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-emerald-500 text-white rounded-xl">
+                      <Wand2 size={20} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-lg">Skill Converter</h3>
+                      <p className="text-[10px] text-black/40 uppercase font-bold tracking-widest">OpenClaw / JSON / YAML</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowConverter(false)}
+                    className="p-2 hover:bg-black/5 rounded-full transition-all"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                
+                <div className="p-8 space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-black/30 uppercase">Paste Skill Definition</label>
+                    <textarea 
+                      value={converterInput}
+                      onChange={(e) => setConverterInput(e.target.value)}
+                      placeholder='{ "name": "my-skill", "description": "...", "parameters": { ... } }'
+                      className="w-full h-[300px] p-4 bg-[#F9F9F9] border border-black/5 rounded-2xl font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  {converterError && (
+                    <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 text-xs font-medium flex items-center gap-2">
+                      <ShieldAlert size={14} />
+                      {converterError}
+                    </div>
+                  )}
+
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => setShowConverter(false)}
+                      className="flex-1 py-4 bg-[#F9F9F9] text-black/40 font-bold rounded-2xl hover:bg-black/5 transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={handleConvert}
+                      disabled={!converterInput.trim()}
+                      className="flex-[2] py-4 bg-emerald-500 text-white font-bold rounded-2xl shadow-lg shadow-emerald-100 hover:bg-emerald-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      <RefreshCw size={18} /> Convert to Ctx Skill
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </main>
 
       {/* Footer Info */}
